@@ -11,51 +11,150 @@ def check_strs(strs):
     for s in strs:
         if isinstance(s, str): continue
         else : raise ValueError
+
+cdef get_all_none_tuple(u64 l):
+    cdef uint i
+    tp = PyTuple_New(l)
+    for i in range(l):
+        PyTuple_SET_ITEM(tp, i, None)
+
+cdef bytes encode_item(value, encoded_value, decode, dict type_map_decode):
+    cdef bytes dv
+    try:
+        dv = decode(value)
+    except Exception as e:
+        raise RuntimeError
+    #
+    if dv == encoded_value:
+        pass
+    else:
+        raise RuntimeError
+    return dv
+
+cpdef encode_fields(key, encoded_key, values, dict fix_fields, dict type_map_decode, u64 fix_len, dict tem_vars,
+                   tuple default_field):
+    cdef tuple tp=default_field
+    cdef dict vars=tem_vars
+    cdef u64 ll=len(fix_fields)+1, size=0
+    cdef U64 num
+    cdef bytes encoded
+    assert len(tem_vars)==0
+    #
+    encode_item(key, encoded_key, type_map_decode)
+    size += len(encoded)
+    for field_value in values:
+        field, value, encoded_value= field_value
+        #
+        if value is not None :
+            encoded = encode_item(value, encoded_value, type_map_decode)
+            size += len(encoded)
+        else:
+            pass
+        #
+        try:
+            num = fix_fields[field]
+        except KeyError:
+            vars[field]=encoded
+        else:
+            PyTuple_SET_ITEM(tp, num.val, encoded_value)
+    return tp, vars, get_U64(size)
+
+cdef encode_insert_fields(key, encoded_key,  values, dict fix_fields, u64 fix_len, dict tem_vars):
+    if len(values)<fix_fields:
+        raise ValueError
+    cdef tuple fixs
+    cdef dict vars
+    cdef u64 i
+    fixs, vars = encode_fields(key, encoded_key,values, fix_fields, fix_len, tem_vars, get_all_none_tuple(len(fix_fields)))
+    for i in range(fix_len):
+        if PyTuple_GET_ITEM(fixs, i) is not None:
+            continue
+        else:
+            raise ValueError
+    return fixs, vars
+
+cdef inline encode_update_fields(key, encoded_key,new_fix_values, tuple old_fix_values, dict old_var_values, dict fix_fields, u64 fix_len, dict tem_vars):
+    cdef tuple fixs
+    cdef dict new_vars
+    fixs, new_vars = encode_fields(key, encoded_key, new_fix_values, fix_fields, fix_len, tem_vars, old_fix_values)
+    old_var_values.update(new_vars)
+    return fixs, old_var_values
+
+
 cdef class DB:
     cdef readonly :
         pass
     cdef :
         dict path_map_disks
         dict kvs
-    def create_kvs(self,str name, dict type_map_encode_decode, fix_fields, paths, u64 blocksize):
+    def create_kvs(self,str name, dict type_map_decode, fix_fields, paths, u64 blocksize):
         if name in self.kvs:
             raise ValueError
         check_strs(fix_fields)
-        check_strs(type_map_encode_decode.keys())
-        check_callables([type_map_encode_decode.values()])
+        check_strs(type_map_decode.keys())
+        check_callables([type_map_decode.values()])
 
 cdef class Kvs:
     cdef readonly:
         str name
         tuple split_keys, block_caches
-        u64 cur_num,
-        u64 blocksize,
-        tuple paths
+        u64 cur_num, blocksize, max_type_num
+        tuple paths, fix_fields
     cdef:
-        dict type_map_encode_decode
-        array changed
+        dict type_map_decode, type_map_num
+        list new_blocks
         dict fix_fields  # {name:str, FixField }
         dict var_fields  # {name:str, {t:type, count:U64} }
 
-    def __init__(self, str name, dict type_map_encode_decode, fix_fields):
+    def __init__(self, str name, dict type_map_decode, fix_fields, paths, u64 blocksize):
+        self.paths = paths
+        self.cur_num = 0
+        self.blocksize = blocksize
+        self.block_caches=tuple()
+        self.split_keys = tuple()
+        self.new_blocks=[]
+        #
         cdef U64 i=0
         cdef dict type_map_num={}
-        for t in type_map_encode_decode.keys():
+        for t in type_map_decode.keys():
             type_map_num[t]=get_U64(i)
+        #
         cdef dict field_map_num={}
         for field in fix_fields:
             field_map_num[field]=get_U64(i)
-
         self.fix_attrs = {}
+        self.var_fields = {}
+        #
+        i=1
+        self.type_map_num = {}
+        for t in type_map_decode.keys():
+            self.type_map_num[t]=get_U64(i)
+        self.type_map_decode = type_map_decode
+        self.max_type_num = len(type_map_decode)
+
+
+
+
     cpdef dict group_keys(self, keys, dict d):
         cdef U64 i
         for key in keys:
             i = self._bisect_key_in(key)
             dict_append(d, i, key)
         return d
+    cpdef dict group_kvs(self, kvs, dict d):
+        cdef U64 i
+        for kv in kvs:
+            key, value = kv
+            i = self._bisect_key_in(key)
+            dict_append(d, i, kv)
+        return d
     cdef inline U64 _bisect_key_in(self, key):
-        cdef u64 i = bisect_obj_in(self.block_files, key, 0, len(self.block_files))
+        cdef u64 i
+        i = bisect_obj_in(self.block_files, key, 0, len(self.block_files))
         return get_U64(i)
+    cpdef insert_kv(self, key, encoded_key, values):
+        if self.split_keys:
+
     cpdef load_blocks(self, indexes):
         NotImplemented
     cpdef read_blocks(self, indexes):
@@ -63,10 +162,10 @@ cdef class Kvs:
         for i in indexes:
             if self.block_caches[i] is None:
 
+    cpdef insert_kvs(self, kvs ):
+        cdef dict block_map_keys = self.group_keys( kvs, {})
 
-    cpdef insert_kvs(self, keys, values, fields):
-        NotImplemented
-    cpdef insert_or_update_kvs(self, keys, values):
+    cpdef insert_or_update_kvs(self, kvs):
         for value in values:
             if len(value) >=
         NotImplemented
@@ -320,37 +419,6 @@ cdef class NewKvsTask:
                 item = self.encode_item(k,v)
             except Exception as e:
                 raise RuntimeError from e
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 cdef class DB:
     cdef :
