@@ -1,7 +1,7 @@
 import os
 import pickle
 
-include "heads.pyx"
+include "fileio.pyx"
 def check_callables(funcs):
     for ff in funcs:
         if callable(ff[0]) and callable(ff[1]): continue
@@ -11,12 +11,6 @@ def check_strs(strs):
     for s in strs:
         if isinstance(s, str): continue
         else : raise ValueError
-
-cdef get_all_none_tuple(u64 l):
-    cdef uint i
-    tp = PyTuple_New(l)
-    for i in range(l):
-        PyTuple_SET_ITEM(tp, i, None)
 
 cdef bytes encode_item(value, encoded_value, decode, dict type_map_decode):
     cdef bytes dv
@@ -31,14 +25,14 @@ cdef bytes encode_item(value, encoded_value, decode, dict type_map_decode):
         raise RuntimeError
     return dv
 
-cpdef encode_fields(key, encoded_key, values, dict fix_fields, dict type_map_decode, u64 fix_len, dict tem_vars,
-                   tuple default_field):
+cpdef update_fields(fix_values0, var_values0, values, dict fix_fields_map_num,):
+
+cpdef encode_fields(key, encoded_key, values, dict fix_fields, dict type_map_decode, tuple default_field):
     cdef tuple tp=default_field
-    cdef dict vars=tem_vars
-    cdef u64 ll=len(fix_fields)+1, size=0
+    cdef dict vars={}
+    cdef u64 ll=len(fix_fields)+1, size=0, fix_len = len(fix_fields)
     cdef U64 num
     cdef bytes encoded
-    assert len(tem_vars)==0
     #
     encode_item(key, encoded_key, type_map_decode)
     size += len(encoded)
@@ -59,6 +53,8 @@ cpdef encode_fields(key, encoded_key, values, dict fix_fields, dict type_map_dec
             PyTuple_SET_ITEM(tp, num.val, encoded_value)
     return tp, vars, get_U64(size)
 
+
+
 cdef encode_insert_fields(key, encoded_key,  values, dict fix_fields, u64 fix_len, dict tem_vars):
     if len(values)<fix_fields:
         raise ValueError
@@ -73,7 +69,7 @@ cdef encode_insert_fields(key, encoded_key,  values, dict fix_fields, u64 fix_le
             raise ValueError
     return fixs, vars
 
-cdef inline encode_update_fields(key, encoded_key,new_fix_values, tuple old_fix_values, dict old_var_values, dict fix_fields, u64 fix_len, dict tem_vars):
+cdef inline encode_update_fields(key, encoded_key, new_fix_values, tuple old_fix_values, dict old_var_values, dict fix_fields, u64 fix_len, dict tem_vars):
     cdef tuple fixs
     cdef dict new_vars
     fixs, new_vars = encode_fields(key, encoded_key, new_fix_values, fix_fields, fix_len, tem_vars, old_fix_values)
@@ -83,16 +79,34 @@ cdef inline encode_update_fields(key, encoded_key,new_fix_values, tuple old_fix_
 
 cdef class DB:
     cdef readonly :
-        pass
+        str name
+        u64 cur_num
+        tuple save_paths
     cdef :
         dict path_map_disks
-        dict kvs
+        dict writing_files
+        set will_used_kvs
+    cpdef pop_caches(self):
+
+    cpdef flush(self):
+        filename = f'{self.name}.db.{self.cur_num}'
+        data = pickle.dumps(self)
+        cdef array rs
+        cdef list files
+        filename = f'{self.name}.db.{self.cur_num}'
+        rs = write_files_background(filename, self.save_paths, data)
+        self.writing_files[filename] = set(self.save_paths)
+    cpdef fsync(self):
+        for filename, paths in self.writing_files.items():
+            NotImplemented
+
     def create_kvs(self,str name, dict type_map_decode, fix_fields, paths, u64 blocksize):
         if name in self.kvs:
             raise ValueError
         check_strs(fix_fields)
         check_strs(type_map_decode.keys())
         check_callables([type_map_decode.values()])
+    def
 
 cdef class Kvs:
     cdef readonly:
@@ -102,7 +116,7 @@ cdef class Kvs:
         tuple paths, fix_fields
     cdef:
         dict type_map_decode, type_map_num
-        list new_blocks
+        array changed_blocks
         dict fix_fields  # {name:str, FixField }
         dict var_fields  # {name:str, {t:type, count:U64} }
 
@@ -112,7 +126,7 @@ cdef class Kvs:
         self.blocksize = blocksize
         self.block_caches=tuple()
         self.split_keys = tuple()
-        self.new_blocks=[]
+        self.changed_blocks=array('b')
         #
         cdef U64 i=0
         cdef dict type_map_num={}
@@ -132,28 +146,80 @@ cdef class Kvs:
         self.type_map_decode = type_map_decode
         self.max_type_num = len(type_map_decode)
 
-
-
-
     cpdef dict group_keys(self, keys, dict d):
         cdef U64 i
+        cdef dict caches = {}, reads = {}
         for key in keys:
+            key, value = key
             i = self._bisect_key_in(key)
-            dict_append(d, i, key)
-        return d
-    cpdef dict group_kvs(self, kvs, dict d):
+            if self.block_caches[i] is None:
+                dict_append(reads, i, key)
+            else:
+                dict_append(caches, i, key)
+        return caches, reads
+    cpdef dict group_kvs(self, kvs):
         cdef U64 i
+        cdef dict caches={}, reads={}
+        cdef char* changes = self.changed_blocks.data.as_chars
         for kv in kvs:
             key, value = kv
             i = self._bisect_key_in(key)
-            dict_append(d, i, kv)
-        return d
+            if changes[i]==1:
+                caches = PyTuple_GET_ITEM(self.block_caches, i)
+                if caches is None: #未缓存
+                    PyTuple_SET_ITEM(self.block_caches, i, {key:value})
+                else:
+                    if value is not None: # 已经缓存的
+                        encode_update_fields()
+                    else:
+                        try:
+                            del caches[key]
+                        except KeyError:
+                            pass
+                dict_append(reads, i, kv)
+            else:
+                dict_append(caches, i, kv)
+        return caches, reads
     cdef inline U64 _bisect_key_in(self, key):
         cdef u64 i
         i = bisect_obj_in(self.block_files, key, 0, len(self.block_files))
         return get_U64(i)
     cpdef insert_kv(self, key, encoded_key, values):
+        cdef U64 i
+        cdef dict caches, values1
+        cdef char * changes = self.changed_blocks.data.as_chars
+        cdef tuple encoded_key_values1
         if self.split_keys:
+            i = self._bisect_key_in(key)
+            caches = PyTuple_GET_ITEM(self.block_caches, i)
+            if changes[i]==0:  # 未读取
+                if caches is None:  # 未缓存
+                    PyTuple_SET_ITEM(self.block_caches, i, {key: (encoded_key,values)})
+                    changes[i]=1
+                else: # 已缓存
+                    try:
+                        encoded_key_values1 = caches[key]
+                        values1 = encoded_key_values1[1]
+                        values1.update(values)
+                        caches[key] = (encoded_key, values1)
+                    except KeyError:
+                        caches[key] = (encoded_key, values1)
+            elif changes[i] == -1: # 已读取未更改
+                if values is not None:  # 更新
+                    caches[key] = values
+                else: # 删除
+                    try:
+                        del caches[key]
+                    except KeyError:
+                        pass
+                changes[i]=1
+            else: # 已更改
+                try:
+                    values0 = caches[key]
+                    if values is not None: #更新
+                        values0.update(values)
+                    else: #删除
+                except KeyError: # 不存在该key
 
     cpdef load_blocks(self, indexes):
         NotImplemented
@@ -161,6 +227,7 @@ cdef class Kvs:
         cdef U64 i
         for i in indexes:
             if self.block_caches[i] is None:
+
 
     cpdef insert_kvs(self, kvs ):
         cdef dict block_map_keys = self.group_keys( kvs, {})

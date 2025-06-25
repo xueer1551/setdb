@@ -9,7 +9,7 @@ from libc.stdlib cimport malloc, free, realloc
 from cpython.time cimport time as get_time_double
 from cpython.mem cimport PyMem_Free,PyMem_Malloc,PyMem_Realloc, PyMem_RawMalloc, PyMem_RawFree
 
-from cpython.list cimport PyList_New, PyList_SetItem, PyList_GetSlice, PyList_GetItem, PyList_GET_ITEM,  PyList_SET_ITEM, PyList_AsTuple
+from cpython.list cimport PyList_New, PyList_SetItem, PyList_GetSlice, PyList_GetItem, PyList_GET_ITEM,  PyList_SET_ITEM, PyList_AsTuple, PyList_Insert
 from cpython.ref cimport Py_INCREF, PyTypeObject, Py_TYPE
 from cpython.buffer cimport PyBuffer_FromContiguous
 from cpython.unicode cimport PyUnicode_Compare, PyUnicode_FromStringAndSize
@@ -20,7 +20,7 @@ from cpython.ref cimport Py_INCREF, Py_DECREF
 from cpython.array cimport array, resize, resize_smart, extend_buffer, copy, newarrayobject, clone
 from cpython.object cimport Py_SIZE
 
-from libc.stdio cimport FILE, fopen, fclose, fdopen, fread, fwrite, fseek, ftell, fseek, rewind, fflush, SEEK_SET, SEEK_CUR, SEEK_END, feof, ferror
+from libc.stdio cimport FILE, fopen, fclose, fdopen, fread, fwrite, fseek, ftell, fseek, rewind, fflush, SEEK_SET, SEEK_CUR, SEEK_END, feof, ferror, setvbuf
 
 import threading, time, os
 import collections
@@ -116,20 +116,33 @@ cdef u64 bisect_obj_in(listuple items, item, u64 low, u64 high):
 cdef u64 _bisect_obj_in(listuple items, item, cmp_func* cmp):
     cdef:
         uint mi, low, high
-        object cmp_r
+        int cmp_r
         #
     low, high = 0, len(items)
     while (low < high):
         mi = (low + high) >> 1
         mid = items[mi]
         cmp_r = cmp(mid, item)
-        if cmp_r is True:
+        if cmp_r <0:
             low = mi + 1
-        elif cmp_r is False:
+        elif cmp_r >0:
             high = mi
         else:
             return mi
-    return len(items)-1
+    return UINT64_MAX
+
+cdef inline u64 bisect_str_in(listuple items, str item):
+    return _bisect_obj_in(items, item, &cmp_str)
+
+cdef cmp_str(str a, str b):
+
+    if len(a) < len(b):
+        return True
+    elif len(a) > len(b):
+        return False
+    else:
+        return PyUnicode_Compare(a, b)
+
 #-----------------------------------------------------------------------------------------------------------------------
 cdef class U64:
     cdef readonly u64 val
@@ -187,6 +200,13 @@ cpdef uint size_get_num(u64 size):
         return 4
     else:
         return 8
+
+cdef get_all_none_tuple(u64 l):
+    cdef uint i
+    tp = PyTuple_New(l)
+    for i in range(l):
+        PyTuple_SET_ITEM(tp, i, None)
+
 #-----------------------------------------------------------------------------------------------------------------------
 cdef parallel_read(filenames)
 

@@ -101,26 +101,50 @@ cdef class IoTask:
 class MyIoError(IOError):
     NotImplemented
 
+cdef set success_filepaths=set(), fault_filepaths=set()
+
 cdef class File:
     cdef readonly :
-        str filename
+        str filepath
         int fd
+        volatile int write_stat
     cdef FILE* stream
-    def __init__(self, str filename):
-        self.filename = filename
+    def __init__(self, str filepath):
+        self.filepath = filepath
+        self.write_ok = 0
         try:
-            fd = os.open(filename, os.O_RDWR)
+            fd = os.open(filepath, os.O_RDWR)
         except Exception as e:
             raise RuntimeError
 
         cdef FILE* stream = fdopen(fd, c"rb+")
+        setvbuf(stream, NULL, 0)
         if stream != NULL:
             self.stream = stream
         else:
             raise RuntimeError
+    cpdef write(self, const u8[:] data):
+        cdef bint r
+        cdef int* ptr = &self.write_stat
+        cdef FILE* stream=self.stream
+        cdef u8* datap=&data[0]
+        cdef u64 size = data.nbytes
+        with nogil:
+            if fseek(stream, 0, SEEK_SET) == 0:
+                if fwrite(datap, size, 1, stream) == size:
+                    fsync_stream(self)
+                    ptr[0] = 1
+                else:
+                    ptr[0] = -1
+            else:
+                ptr[0] = -2
+        if ptr[0]==1:
+            success_filepaths.add(self.filepath)
+        else:
+            fault_filepaths.add(self.filepath)
 
     cpdef u64 filelen(self):
-        NotImplemented
+        return os.path.getsize(self.filepath)
     cpdef IoTask get_read_task(self):
         cdef IoTask task= IoTask()
         cdef u64 size = self.filelen()
@@ -129,10 +153,26 @@ cdef class File:
         task.task = ioTask(self.stream, data, 0, size, 0)
         return task
     def __dealloc__(self):
-        self.stream=NULL
-        self.fd = -1
-        self.filename = None
+        if self.stream != NULL:
+            fclose(self.stream)
+            self.stream=NULL
+            self.fd = -1
+            self.filepath = None
 
+        
+cpdef array write_files_background(filename, paths, data):
+    cdef list files = []
+    cdef u64 i, l =len(paths)
+    i = 0
+    for path in paths:
+        fp = os.path.join(path, filename)
+        file = File(fp)
+        files.append(file)
+    for file in files:
+        t = threading.Thread(target=file.write, args=(data, ), daemon=True)
+        i += 1
+        t.start()
+    files.clear()
 #-----------------------------------------------------------------------------------------------------------------------
 
 cdef class ReadingTasks:
